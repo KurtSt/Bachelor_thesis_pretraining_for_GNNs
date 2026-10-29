@@ -1,0 +1,11 @@
+class_path: chebai_graph.models.gin_net.GINEConvNet
+init_args:
+  optimizer_kwargs:
+    lr: 0.01
+  config:
+    hidden_size: 512
+    dropout_rate: 0.1
+    n_conv_layers: 5
+    n_linear_layers: 3
+    n_atom_properties: 125
+    n_bond_properties: 5

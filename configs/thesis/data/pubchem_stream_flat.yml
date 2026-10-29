@@ -1,0 +1,18 @@
+# Pretraining data, flat graph: PubChem streamed in a fixed random order,
+# same properties as chebi50_flat.yml
+class_path: chebai_graph.preprocessing.datasets.PubChemFlatStream
+init_args:
+  pubchem_release: "2026-09-01"
+  stream_size: null  # null = all molecules of the release
+  validation_size: 10000
+  stream_seed: 42
+  properties:
+      - chebai_graph.preprocessing.properties.AtomType
+      - chebai_graph.preprocessing.properties.NumAtomBonds
+      - chebai_graph.preprocessing.properties.AtomCharge
+      - chebai_graph.preprocessing.properties.AtomAromaticity
+      - chebai_graph.preprocessing.properties.AtomHybridization
+      - chebai_graph.preprocessing.properties.AtomNumHs
+      - chebai_graph.preprocessing.properties.BondType
+      - chebai_graph.preprocessing.properties.BondInRing
+      - chebai_graph.preprocessing.properties.BondAromaticity

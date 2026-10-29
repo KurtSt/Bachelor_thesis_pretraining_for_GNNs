@@ -1,0 +1,6 @@
+# Optional W&B logger for cluster runs; override project/entity/name on the command line
+class_path: chebai.loggers.custom.CustomLogger
+init_args:
+  save_dir: logs
+  project: ba-gnn-pretraining
+  log_model: false

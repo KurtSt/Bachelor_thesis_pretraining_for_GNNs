@@ -1,0 +1,4 @@
+# chebai's BCEWeighted (Cui et al., beta 0.99) with the weights computed from labels only
+class_path: chebai_graph.loss.bce_weighted.BCEWeightedFromLabels
+init_args:
+  beta: 0.99

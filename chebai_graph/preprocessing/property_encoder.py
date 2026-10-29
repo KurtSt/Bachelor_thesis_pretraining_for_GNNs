@@ -1,0 +1,406 @@
+import abc
+import inspect
+import os
+import sys
+from itertools import islice
+
+import torch
+
+
+class PropertyEncoder(abc.ABC):
+    """
+    Abstract base class for encoding property values.
+
+    Args:
+        property: The property object associated with this encoder.
+        **kwargs: Additional keyword arguments.
+    """
+
+    def __init__(self, property, eval=False, **kwargs) -> None:
+        self.property = property
+        self._encoding_length: int = 1
+        self.eval = eval  # if True, do not update cache (for index encoder)
+
+    @property
+    def name(self) -> str:
+        """Name of the encoder."""
+        return ""
+
+    def get_encoding_length(self) -> int:
+        """Return the length of the encoding vector."""
+        return self._encoding_length
+
+    def set_encoding_length(self, encoding_length: int) -> None:
+        """Set the length of the encoding vector."""
+        self._encoding_length = encoding_length
+
+    def encode(self, value) -> torch.Tensor:
+        """
+        Encode the given value.
+
+        Args:
+            value: The value to encode.
+
+        Returns:
+            Encoded tensor.
+        """
+        return value
+
+    def compress(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Compress an encoded tensor into a more compact on-disk representation.
+
+        Called just before caching property values to disk. The default
+        implementation is a no-op; subclasses override it to reduce file size
+        (e.g. by downcasting the dtype or storing indices instead of one-hot
+        vectors). Must be losslessly invertible by :meth:`decompress` (except
+        for deliberate float precision reductions).
+
+        Args:
+            tensor: The encoded property tensor for a single molecule.
+
+        Returns:
+            A compact tensor to store on disk.
+        """
+        return tensor
+
+    def decompress(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Reconstruct the full encoded tensor from its compressed on-disk form.
+
+        Inverse of :meth:`compress`, called right after loading cached property
+        values. The default implementation is a no-op.
+
+        Args:
+            tensor: The compressed property tensor as loaded from disk.
+
+        Returns:
+            The reconstructed encoded property tensor.
+        """
+        return tensor
+
+    def on_start(self, **kwargs) -> None:
+        """Hook called at the start of encoding process."""
+        pass
+
+    def on_finish(self) -> None:
+        """Hook called at the end of encoding process."""
+        return
+
+
+class IndexEncoder(PropertyEncoder):
+    """
+    Encodes property values as indices. For that purpose, compiles a dynamic list of different values that have
+    occurred. Stores this list in a file for later reference.
+
+    Args:
+        property: The property object.
+        indices_dir: Optional directory to store index files.
+        **kwargs: Additional keyword arguments.
+    """
+
+    def __init__(
+        self, property, data_type: str, indices_dir: str | None = None, **kwargs
+    ) -> None:
+        super().__init__(property, **kwargs)
+        if indices_dir is None:
+            indices_dir = os.path.dirname(inspect.getfile(self.__class__))
+        self.dirname = indices_dir
+        # load already existing cache
+        self._data_type = data_type
+        with open(self.index_path, "r") as pk:
+            self.cache: dict[str, int] = {
+                token.strip(): idx for idx, token in enumerate(pk)
+            }
+        self.index_length_start = len(self.cache)
+        self._unk_token_idx = 0
+        self._count_for_unk_token = 0
+        self.offset = 1
+        # A frozen encoder never extends its token file, unseen tokens are encoded as
+        # unknown. Used for pretraining data, which needs the vocabulary of the
+        # fine-tuning data.
+        self.frozen = False
+
+    @property
+    def name(self) -> str:
+        """Name of this encoder."""
+        return "index"
+
+    @property
+    def index_path(self) -> str:
+        """Get path to store indices of property values, create file if it does not exist yet
+
+        Returns:
+            Path to index file.
+        """
+        assert self._data_type is not None, "data_type must be set for IndexEncoder"
+        index_path = os.path.join(
+            self.dirname,
+            "bin",
+            self._data_type,
+            self.property.name,
+            f"indices_{self.name}.txt",
+        )
+        os.makedirs(os.path.dirname(index_path), exist_ok=True)
+        if not os.path.exists(index_path):
+            with open(index_path, "x"):
+                pass
+        return index_path
+
+    def on_finish(self) -> None:
+        """
+        Save cache
+
+        Saves new tokens added to the cache to the index file and logs count of unknown tokens.
+        """
+        total_tokens = len(self.cache)
+        if total_tokens > self.index_length_start:
+            print("New tokens added to the cache, Saving them to index token file.....")
+
+            assert sys.version_info >= (
+                3,
+                7,
+            ), "This code requires Python 3.7 or higher."
+            # For python 3.7+, the standard dict type preserves insertion order, and is iterated over in same order
+            # https://docs.python.org/3/whatsnew/3.7.html#summary-release-highlights
+            # https://mail.python.org/pipermail/python-dev/2017-December/151283.html
+            new_tokens = list(islice(self.cache, self.index_length_start, total_tokens))
+
+            with open(self.index_path, "a") as pk:
+                pk.writelines([f"{c}\n" for c in new_tokens])
+                print(
+                    f"New {len(new_tokens)} tokens append to index of property {self.property.name} to {self.index_path}..."
+                )
+                print(
+                    f"Now, the total length of the index of property {self.property.name} is {total_tokens}"
+                )
+
+        if self._count_for_unk_token > 0:
+            print(
+                f"{self.__class__.__name__} Encountered {self._count_for_unk_token} unknown tokens"
+            )
+
+    def encode(self, token: str | None) -> torch.Tensor:
+        """
+        Returns a unique number for each token, automatically adds new tokens to the cache.
+
+        Args:
+            token: The token to encode.
+
+        Returns:
+            A tensor containing the encoded index.
+        """
+        if token is None:
+            self._count_for_unk_token += 1
+            return torch.tensor([self._unk_token_idx])
+
+        if (self.eval or self.frozen) and str(token) not in self.cache:
+            self._count_for_unk_token += 1
+            return torch.tensor([self._unk_token_idx])
+
+        if str(token) not in self.cache:
+            # Ensure cache is a mutable dict (jsonargparse may convert it to mappingproxy)
+            if not isinstance(self.cache, dict):
+                self.cache = dict(self.cache)
+            self.cache[str(token)] = len(self.cache)
+        return torch.tensor([self.cache[str(token)] + self.offset])
+
+
+class OneHotEncoder(IndexEncoder):
+    """
+    Returns one-hot encoding of the value (position in one-hot vector is defined by index).
+
+    Args:
+        property: The property object.
+        n_labels: Optional number of labels for encoding.
+        **kwargs: Additional keyword arguments.
+    """
+
+    def __init__(self, property, n_labels: int | None = None, **kwargs) -> None:
+        super().__init__(property, **kwargs)
+        self._encoding_length = n_labels
+        # To undo any offset set by index encoder as its not relevant for one-hot-encoder (no offset needed for some unknown/reserved token)
+        # Also, `torch.nn.functional.one_hot` that class values must be smaller than num_classes.
+        self.offset = 0
+
+    def get_encoding_length(self) -> int:
+        """Return the number of classes for one-hot encoding."""
+        return self._encoding_length or len(self.cache)
+
+    @property
+    def name(self) -> str:
+        """Name of this encoder."""
+        return "one_hot"
+
+    def on_start(self, property_values: list[list[str | None]]) -> None:
+        """
+        To get correct number of classes during encoding, cache unique tokens beforehand
+
+        Args:
+            property_values: List of property value sequences.
+        """
+        unique_tokens = list(
+            dict.fromkeys(
+                [
+                    v
+                    for vs in property_values
+                    if vs is not None
+                    for v in vs
+                    if v is not None
+                ]
+            )
+        )
+        self.tokens_dict: dict[str, torch.Tensor] = {}
+        for token in unique_tokens:
+            if self.frozen and str(token) not in self.cache:
+                # Unknown token, encoded as an all-zero row
+                continue
+            self.tokens_dict[token] = super().encode(token)
+
+    def encode(self, token: str | None) -> torch.Tensor:
+        """
+        Returns one-hot encoded tensor for the token.
+
+        Args:
+            token: The token to encode.
+
+        Returns:
+            One-hot encoded tensor of shape (1, encoding_length).
+        """
+        if self.eval:
+            if token is None or str(token) not in self.cache:
+                self._count_for_unk_token += 1
+                return torch.zeros(self.get_encoding_length(), dtype=torch.int64)
+            index = self.cache[str(token)] + self.offset
+            return torch.nn.functional.one_hot(
+                torch.tensor(index), num_classes=self.get_encoding_length()
+            )
+
+        if token not in self.tokens_dict:
+            self._count_for_unk_token += 1
+            return torch.zeros(1, self.get_encoding_length(), dtype=torch.int64)
+
+        return torch.nn.functional.one_hot(
+            self.tokens_dict[token], num_classes=self.get_encoding_length()
+        )
+
+    def compress(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Store one index per node instead of the full one-hot matrix.
+
+        A dense ``(N, n_classes)`` int64 one-hot matrix is reduced to an
+        ``(N,)`` vector of class indices. Index ``0`` is reserved for all-zero
+        rows (produced by :meth:`encode` for unknown tokens); real classes are
+        stored as ``argmax + 1``. The result uses ``uint8`` when it fits, else
+        ``int16``.
+
+        Args:
+            tensor: One-hot tensor of shape ``(N, n_classes)``.
+
+        Returns:
+            Index tensor of shape ``(N,)``.
+        """
+        if tensor.dim() != 2:
+            # already compressed / unexpected shape - leave untouched
+            return tensor
+        has_class = tensor.any(dim=1)
+        indices = torch.where(
+            has_class,
+            tensor.argmax(dim=1) + 1,
+            torch.zeros_like(has_class, dtype=torch.long),
+        )
+        return indices.to(torch.int16)
+
+    def decompress(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Reconstruct the dense one-hot matrix from stored class indices.
+
+        Inverse of :meth:`compress`. Index ``0`` maps back to an all-zero row;
+        index ``i > 0`` maps to a one-hot with class ``i - 1`` set.
+
+        Args:
+            tensor: Index tensor of shape ``(N,)`` as produced by
+                :meth:`compress`.
+
+        Returns:
+            One-hot tensor of shape ``(N, n_classes)`` keeping the compact
+            stored dtype (e.g. ``uint8``); it is promoted to float when merged
+            into the node/edge feature matrix at load time.
+        """
+        if tensor.dim() != 1:
+            # already expanded / unexpected shape - leave untouched
+            return tensor
+        n_classes = self.get_encoding_length()
+        out = torch.zeros((tensor.shape[0], n_classes), dtype=tensor.dtype)
+        non_zero = tensor > 0
+        if non_zero.any():
+            out[non_zero] = torch.nn.functional.one_hot(
+                tensor[non_zero].to(torch.int64) - 1, num_classes=n_classes
+            ).to(out.dtype)
+        return out
+
+
+class AsIsEncoder(PropertyEncoder):
+    """
+    Returns the input value as it is, useful e.g. for float values.
+    """
+
+    @property
+    def name(self) -> str:
+        """Name of this encoder."""
+        return "asis"
+
+    def encode(self, token: float | int | None) -> torch.Tensor:
+        """
+        Return the input value as tensor, or zero tensor if None.
+
+        Args:
+            token: The value to encode.
+
+        Returns:
+            Tensor of shape (1,) containing the input value or zero.
+        """
+        if token is None:
+            return torch.zeros(1, self.get_encoding_length())
+        assert len(token) == self.get_encoding_length(), (
+            "Length of token should be equal to encoding length"
+        )
+        # return torch.tensor([token]) # token is an ndarray, no need to create list of ndarray due to below warning
+        # UserWarning: Creating a tensor from a list of numpy.ndarrays is extremely slow.
+        # Please consider converting the list to a single numpy.ndarray with numpy.array() before converting to a tensor.
+        # (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\torch\csrc\utils\tensor_new.cpp:257.)
+        # ----- fix: for above warning
+        return torch.tensor(token).unsqueeze(0)  # shape: (1, len(token))
+
+    def compress(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Downcast float values to float32 to halve the on-disk size."""
+        if tensor.is_floating_point():
+            return tensor.to(torch.float32)
+        return tensor
+
+
+class BoolEncoder(PropertyEncoder):
+    """
+    Encodes boolean values as 0 or 1.
+    """
+
+    @property
+    def name(self) -> str:
+        """Name of this encoder."""
+        return "bool"
+
+    def encode(self, token: bool) -> torch.Tensor:
+        """
+        Encode boolean token as tensor.
+
+        Args:
+            token: Boolean value.
+
+        Returns:
+            Tensor with 1 if True else 0.
+        """
+        return torch.tensor([1 if token else 0])
+
+    def compress(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Store the 0/1 values as ``uint8`` instead of ``int64`` (8x smaller)."""
+        return tensor.to(torch.uint8)

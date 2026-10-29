@@ -1,0 +1,21 @@
+# Pretraining on the augmented graph. The encoder config must equal gat_augmented.yml.
+# The tasks are set by scripts/pretrain.sh according to the strategy.
+class_path: chebai_graph.models.pretraining.GATGraphPretraining
+init_args:
+  optimizer_kwargs:
+    lr: 1e-3
+  config:
+    in_channels: 203
+    hidden_channels: 256
+    out_channels: 512
+    num_layers: 4
+    edge_dim: 12
+    heads: 8
+    v2: True
+    dropout: 0
+  tasks:
+    - atom_type
+  mask_rate: 0.15
+  n_shared_node_columns: 3  # node type one-hot (AtomNodeLevel) stays visible
+  hide_graph_node_features: true  # the RDKit descriptors contain the molecule targets
+  task_weighting: equal

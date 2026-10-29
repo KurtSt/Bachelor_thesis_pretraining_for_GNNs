@@ -1,0 +1,32 @@
+# Pretraining data, augmented graph: PubChem streamed in a fixed random order,
+# same properties as chebi50_augmented.yml
+class_path: chebai_graph.preprocessing.datasets.PubChemAugmentedStream
+init_args:
+  pubchem_release: "2026-09-01"
+  stream_size: null  # null = all molecules of the release
+  validation_size: 10000
+  stream_seed: 42
+  # the pretraining model hides the graph node descriptors, so they are not computed
+  zero_graph_node_descriptors: true
+  properties:
+      # All node types
+      - chebai_graph.preprocessing.properties.AtomNodeLevel
+      # Atom nodes
+      - chebai_graph.preprocessing.properties.AugAtomAromaticity
+      - chebai_graph.preprocessing.properties.AugAtomCharge
+      - chebai_graph.preprocessing.properties.AugAtomHybridization
+      - chebai_graph.preprocessing.properties.AugAtomNumHs
+      - chebai_graph.preprocessing.properties.AugAtomType
+      - chebai_graph.preprocessing.properties.AugNumAtomBonds
+      # FG nodes
+      - chebai_graph.preprocessing.properties.AtomFunctionalGroup
+      - chebai_graph.preprocessing.properties.IsHydrogenBondDonorFG
+      - chebai_graph.preprocessing.properties.IsHydrogenBondAcceptorFG
+      - chebai_graph.preprocessing.properties.IsFGAlkyl
+      # Graph node
+      - chebai_graph.preprocessing.properties.AugRDKit2DNormalized
+      # Edges
+      - chebai_graph.preprocessing.properties.BondLevel
+      - chebai_graph.preprocessing.properties.AugBondAromaticity
+      - chebai_graph.preprocessing.properties.AugBondInRing
+      - chebai_graph.preprocessing.properties.AugBondType

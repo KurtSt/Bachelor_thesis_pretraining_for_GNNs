@@ -1,0 +1,20 @@
+# Pretraining on the flat graph. The encoder config must equal gat_flat.yml.
+# The tasks are set by scripts/pretrain.sh according to the strategy.
+class_path: chebai_graph.models.pretraining.GATGraphPretraining
+init_args:
+  optimizer_kwargs:
+    lr: 1e-3
+  config:
+    in_channels: 161
+    hidden_channels: 256
+    out_channels: 512
+    num_layers: 4
+    edge_dim: 8
+    heads: 8
+    v2: True
+    dropout: 0
+  tasks:
+    - atom_type
+  mask_rate: 0.15
+  n_shared_node_columns: 0
+  hide_graph_node_features: false
